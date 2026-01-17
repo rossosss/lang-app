@@ -81,3 +81,116 @@ export const getCourseById = cache(async (courceId: number) => {
 
   return data;
 });
+
+export const getCourseProgress = cache(async () => {
+  const { userId } = await auth();
+  const userProgress = await getUserProgress();
+
+  if(!userId || !userProgress?.activeCourseId) {
+    return null;
+  }
+
+  const unitsInActiveCourse = await db.query.units.findMany({
+    orderBy: (units, { asc }) => [asc(units.order)],
+    where: eq(units.courseId, userProgress.activeCourseId),
+    with: {
+      lessons: {
+        orderBy: (lessons, { asc }) => [asc(lessons.order)],
+        with: {
+          unit: true,
+          challenges: {
+            with: {
+              challengeProgess: {
+                where: eq(challengeProgess.userId, userId),
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+
+  const firstUncompletedLesson = unitsInActiveCourse
+    .flatMap((unit) => unit.lessons)
+    .find((lesson) => {
+      // TODO: Если что-то не работает, проверить последний if
+      return lesson.challenges.some((challenge) => {
+        return !challenge.challengeProgess 
+        || challenge.challengeProgess.length === 0 
+        || challenge.challengeProgess.some((progress) => progress.completed === false);
+      });
+    });
+  
+  return {
+    activeLesson: firstUncompletedLesson,
+    activeLessonId: firstUncompletedLesson?.id,
+  };
+});
+
+export const getLesson = cache(async (id?: number) => {
+  const { userId } = await auth();
+
+  if(!userId) {
+    return null;
+  }
+
+  const courseProgress = await getCourseProgress();
+
+  const lessonId = id || courseProgress?.activeLessonId;
+
+  if(!lessonId) {
+    return null;
+  }
+
+  const data = await db.query.lessons.findFirst({
+    where: eq(lessons.id, lessonId),
+    with: {
+      challenges: {
+        orderBy: (challenges, { asc }) =>[asc(challenges.order)],
+        with: {
+          challengeOptions: true,
+          challengeProgess: {
+            where: eq(challengeProgess.userId, userId)
+          },
+        },
+      },
+    },
+  });
+
+  if(!data || !data.challenges) {
+    return null;
+  };
+
+  const normalizedChallenges = data.challenges.map((challenge) =>{
+    // TODO: Если что-то не работает, проверить последний if
+    const completed = challenge.challengeProgess 
+      && challenge.challengeProgess.length > 0
+      && challenge.challengeProgess.every((progress) => progress.completed);
+
+    return {...challenge, completed };
+  });
+
+  return { ...data, challenges: normalizedChallenges };
+});
+
+export const getLessonPercentage = cache(async () => {
+  const courceProgress = await getCourseProgress();
+
+  if(!courceProgress?.activeLessonId) {
+    return 0;
+  }
+
+  const lesson = await getLesson(courceProgress.activeLessonId);
+
+  if(!lesson) {
+    return 0;
+  }
+
+  const completedChallenges = lesson.challenges.filter((challenge) => challenge.completed);
+
+  const percentage = Math.round(
+    (completedChallenges.length / lesson.challenges.length) * 100,
+  );
+
+  return percentage;
+})
